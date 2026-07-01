@@ -32,10 +32,21 @@ jobs:
       with:
         name: build-log
         path: build.log
-    - name: Upload APK
+    - name: Upload APK artifact
       if: success()
       uses: actions/upload-artifact@v4
       with:
         name: hermes-voice-debug
         path: app/build/outputs/apk/debug/app-debug.apk
         retention-days: 90
+    - name: Create Release with APK
+      if: success() && startsWith(github.ref, 'refs/tags/v')
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release create "${{ github.ref_name }}" \
+          --repo "${{ github.repository }}" \
+          --title "${{ github.ref_name }}" \
+          --generate-notes \
+          --fail-on-no-commits=false \
+          app/build/outputs/apk/debug/app-debug.apk
