@@ -304,6 +304,69 @@ def process_voice(audio_data: bytes, content_type: str = "audio/wav") -> dict:
             pass
 
 
+def process_voice_text_only(audio_data: bytes, content_type: str = "audio/wav") -> dict:
+    """Fast pipeline: STT -> Chat only (no TTS). Client handles TTS locally."""
+    timings = {}
+    result = {"text_in": "", "text_out": "", "audio_path": None, "timings": timings}
+
+    ext = ".ogg"
+    if "mp4" in content_type or "aac" in content_type:
+        ext = ".mp4"
+    elif "wav" in content_type:
+        ext = ".wav"
+
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
+        f.write(audio_data)
+        audio_in_path = f.name
+
+    try:
+        # Step 1: STT
+        t0 = time.time()
+        user_text = None
+
+        if DEEPGRAM_API_KEY:
+            try:
+                user_text = transcribe_deepgram(audio_in_path, content_type)
+                timings["stt_method"] = "deepgram"
+            except Exception as e:
+                log.warning(f"Deepgram STT failed ({e}), falling back to local whisper")
+
+        if not user_text or user_text.startswith("[STT ERROR"):
+            user_text = transcribe_local(audio_in_path)
+            timings["stt_method"] = "local_whisper"
+
+        timings["stt"] = round(time.time() - t0, 2)
+        result["text_in"] = user_text
+
+        if user_text.startswith("[STT ERROR") or user_text.startswith("[ERROR"):
+            result["text_out"] = "Sorry, I couldn't understand the audio."
+            timings["total"] = round(sum(v for k, v in timings.items() if isinstance(v, (int, float))), 2)
+            return result
+
+        log.info(f"STT ({timings['stt']}s, {timings.get('stt_method', '?')}): {user_text[:80]}")
+
+        # Step 2: Chat
+        t0 = time.time()
+        try:
+            response_text = chat_hermes(user_text)
+        except Exception as e:
+            log.warning(f"API server failed ({e}), falling back to CLI")
+            response_text = chat_hermes_cli(user_text)
+        timings["chat"] = round(time.time() - t0, 2)
+        result["text_out"] = response_text
+
+        log.info(f"Chat ({timings['chat']}s): {response_text[:80]}")
+
+        timings["total"] = round(sum(v for k, v in timings.items() if isinstance(v, (int, float))), 2)
+        return result
+
+    finally:
+        try:
+            os.unlink(audio_in_path)
+        except OSError:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # HTTP Handler
 # ---------------------------------------------------------------------------
@@ -392,15 +455,30 @@ class VoiceHandler(BaseHTTPRequestHandler):
 
             content_type = self.headers.get("Content-Type", "audio/wav")
 
-            audio_data = self.rfile.read(content_length)
-            log.info(f"Received {len(audio_data)} bytes of audio ({content_type})")
+            # Check if client wants text-only (no TTS on server)
+            query = urlparse(self.path).query
+            skip_tts = "tts=false" in query
 
-            result = process_voice(audio_data, content_type)
+            audio_data = self.rfile.read(content_length)
+            log.info(f"Received {len(audio_data)} bytes of audio ({content_type}), skip_tts={skip_tts}")
+
+            if skip_tts:
+                # Fast path: STT + Chat only, no TTS
+                result = process_voice_text_only(audio_data, content_type)
+            else:
+                result = process_voice(audio_data, content_type)
 
             def safe(text, max_len=400):
                 return text.replace("\n", " ").replace("\r", "")[:max_len]
 
-            if result["audio_path"]:
+            if skip_tts:
+                # Return JSON with text + timings
+                self._send_json(200, {
+                    "text_in": result["text_in"],
+                    "text_out": result["text_out"],
+                    "timings": result["timings"],
+                })
+            elif result["audio_path"]:
                 audio_bytes = Path(result["audio_path"]).read_bytes()
                 try:
                     os.unlink(result["audio_path"])

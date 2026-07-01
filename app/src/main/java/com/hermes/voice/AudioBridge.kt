@@ -3,12 +3,14 @@ package com.hermes.voice
 import android.media.*
 import android.media.AudioRecord
 import android.os.Build
+import android.speech.tts.TextToSpeech
 import android.util.Base64
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.util.Locale
 
 class AudioBridge(private val activity: MainActivity, private val webView: WebView) {
 
@@ -25,6 +27,31 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
     private var mediaPlayer: MediaPlayer? = null
     private var speakerEnabled = false
     private var bluetoothEnabled = false
+
+    // Android TTS engine
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private var ttsEngine = "com.google.android.tts" // Google TTS default
+
+    init {
+        initTts()
+    }
+
+    private fun initTts() {
+        tts = TextToSpeech(activity, { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                ttsReady = true
+                val engine = tts?.defaultEngine ?: ""
+                val result = tts?.setLanguage(Locale.US) ?: TextToSpeech.LANG_NOT_SUPPORTED
+                activity.runOnUiThread {
+                    webView.evaluateJavascript(
+                        "if (window.onTtsReady) window.onTtsReady('$engine', ${result == TextToSpeech.LANG_AVAILABLE});",
+                        null
+                    )
+                }
+            }
+        }, ttsEngine)
+    }
 
     @JavascriptInterface
     fun startRecording(): String {
@@ -181,7 +208,10 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
         Thread {
             try {
                 val bridgeUrl = getBridgeUrl()
-                val url = java.net.URL("$bridgeUrl/voice")
+                // Request text-only mode (no server TTS) - we speak locally
+                val useLocalTts = isLocalTtsEnabled()
+                val endpoint = if (useLocalTts) "$bridgeUrl/voice?tts=false" else "$bridgeUrl/voice"
+                val url = java.net.URL(endpoint)
                 val conn = url.openConnection() as java.net.HttpURLConnection
                 conn.requestMethod = "POST"
                 conn.connectTimeout = 10000
@@ -197,16 +227,35 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
 
                 val responseCode = conn.responseCode
                 if (responseCode == java.net.HttpURLConnection.HTTP_OK) {
-                    val userTranscript = conn.getHeaderField("X-Transcript") ?: ""
-                    val assistantResponse = conn.getHeaderField("X-Response") ?: ""
-                    val audioBytes = conn.inputStream.use { it.readBytes() }
+                    if (useLocalTts) {
+                        // Text-only JSON response - speak locally
+                        val responseBody = conn.inputStream.use { it.readBytes() }
+                        val json = JSONObject(String(responseBody))
+                        val userTranscript = json.optString("text_in", "")
+                        val assistantResponse = json.optString("text_out", "")
+                        val timings = json.optString("timings", "{}")
 
-                    activity.runOnUiThread {
-                        val escUser = JSONObject.quote(userTranscript)
-                        val escAssistant = JSONObject.quote(assistantResponse)
-                        webView.evaluateJavascript("if (window.onBridgeSuccess) window.onBridgeSuccess($escUser, $escAssistant);", null)
-                        
-                        playAudioBytes(audioBytes)
+                        activity.runOnUiThread {
+                            val escUser = JSONObject.quote(userTranscript)
+                            val escAssistant = JSONObject.quote(assistantResponse)
+                            webView.evaluateJavascript("if (window.onBridgeSuccess) window.onBridgeSuccess($escUser, $escAssistant);", null)
+
+                            // Speak locally via Android TTS
+                            speakText(assistantResponse)
+                        }
+                    } else {
+                        // Legacy mode: server returned audio
+                        val userTranscript = conn.getHeaderField("X-Transcript") ?: ""
+                        val assistantResponse = conn.getHeaderField("X-Response") ?: ""
+                        val audioBytes = conn.inputStream.use { it.readBytes() }
+
+                        activity.runOnUiThread {
+                            val escUser = JSONObject.quote(userTranscript)
+                            val escAssistant = JSONObject.quote(assistantResponse)
+                            webView.evaluateJavascript("if (window.onBridgeSuccess) window.onBridgeSuccess($escUser, $escAssistant);", null)
+
+                            playAudioBytes(audioBytes)
+                        }
                     }
                 } else {
                     val errorMsg = "Server returned code $responseCode"
@@ -221,6 +270,50 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
                 }
             }
         }.start()
+    }
+
+    // -----------------------------------------------------------------------
+    // Android native TTS
+    // -----------------------------------------------------------------------
+
+    private fun speakText(text: String) {
+        if (!ttsReady || tts == null) {
+            webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('TTS not ready');", null)
+            return
+        }
+
+        val speed = getTtsSpeed()
+        tts?.setSpeechRate(speed)
+
+        webView.evaluateJavascript("if (window.onAudioPlayStarted) window.onAudioPlayStarted();", null)
+
+        tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+            override fun onDone(utteranceId: String?) {
+                activity.runOnUiThread {
+                    webView.evaluateJavascript("if (window.onAudioPlayCompleted) window.onAudioPlayCompleted();", null)
+                }
+            }
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                activity.runOnUiThread {
+                    webView.evaluateJavascript("if (window.onAudioError) window.onAudioError('TTS error');", null)
+                }
+            }
+        })
+
+        val params = android.os.Bundle()
+        if (speakerEnabled) {
+            params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC)
+        } else {
+            params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_VOICE_CALL)
+        }
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "hermes_tts")
+    }
+
+    @JavascriptInterface
+    fun stopSpeaking() {
+        tts?.stop()
     }
 
     private fun playAudioBytes(audioBytes: ByteArray) {
@@ -276,8 +369,6 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
             webView.evaluateJavascript("if (window.onAudioError) window.onAudioError('${e.message}');", null)
         }
     }
-
-    // WAV wrapping helpers removed, compression handles native containers
 
     @JavascriptInterface
     fun playAudio(base64Audio: String) {
@@ -338,6 +429,7 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
 
     @JavascriptInterface
     fun stopAudio() {
+        tts?.stop()
         activity.runOnUiThread {
             mediaPlayer?.let {
                 if (it.isPlaying) it.stop()
@@ -458,6 +550,31 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
     fun setRequestTimeout(timeoutMs: Long) {
         val prefs = activity.getSharedPreferences("hermes_voice", android.content.Context.MODE_PRIVATE)
         prefs.edit().putLong("request_timeout", timeoutMs).apply()
+    }
+
+    // TTS settings
+    @JavascriptInterface
+    fun isLocalTtsEnabled(): Boolean {
+        val prefs = activity.getSharedPreferences("hermes_voice", android.content.Context.MODE_PRIVATE)
+        return prefs.getBoolean("local_tts_enabled", true) // default ON
+    }
+
+    @JavascriptInterface
+    fun setLocalTtsEnabled(enabled: Boolean) {
+        val prefs = activity.getSharedPreferences("hermes_voice", android.content.Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("local_tts_enabled", enabled).apply()
+    }
+
+    @JavascriptInterface
+    fun getTtsSpeed(): Float {
+        val prefs = activity.getSharedPreferences("hermes_voice", android.content.Context.MODE_PRIVATE)
+        return prefs.getFloat("tts_speed", 1.1f) // slightly faster than normal
+    }
+
+    @JavascriptInterface
+    fun setTtsSpeed(speed: Float) {
+        val prefs = activity.getSharedPreferences("hermes_voice", android.content.Context.MODE_PRIVATE)
+        prefs.edit().putFloat("tts_speed", speed).apply()
     }
 
     @JavascriptInterface

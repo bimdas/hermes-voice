@@ -493,6 +493,19 @@ input:checked + .slider:before {
       <label>Request Timeout (ms)</label>
       <input type="number" id="requestTimeoutInput" placeholder="120000" min="10000" max="300000">
     </div>
+
+    <div class="settings-row">
+      <label for="localTtsToggle">Local TTS (on-device)</label>
+      <label class="switch">
+        <input type="checkbox" id="localTtsToggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="settings-field">
+      <label>TTS Speed (0.5 - 2.0)</label>
+      <input type="number" id="ttsSpeedInput" placeholder="1.1" min="0.5" max="2.0" step="0.1">
+    </div>
     
     <button class="settings-btn" onclick="saveSettings()">Save</button>
     <button class="settings-btn" style="background:rgba(255,255,255,0.06);color:#f1f5f9;margin-top:10px;box-shadow:none;" onclick="closeSettings()">Cancel</button>
@@ -681,6 +694,10 @@ window.onBridgeError = function(errorMsg) {
   }, 3000);
 };
 
+window.onTtsReady = function(engine, langOk) {
+  log('TTS ready: engine=' + engine + ', lang=' + langOk);
+};
+
 function onAudioPlayStarted() {
   log('Audio playback started');
 }
@@ -784,6 +801,8 @@ function openSettings() {
     document.getElementById('silenceDurationInput').value = AudioBridge.getSilenceDuration();
     document.getElementById('speechThresholdInput').value = AudioBridge.getSpeechThreshold();
     document.getElementById('requestTimeoutInput').value = AudioBridge.getRequestTimeout();
+    document.getElementById('localTtsToggle').checked = AudioBridge.isLocalTtsEnabled();
+    document.getElementById('ttsSpeedInput').value = AudioBridge.getTtsSpeed();
   } catch(e) {
     log('Failed loading settings to UI: ' + e.message);
   }
@@ -800,6 +819,8 @@ function saveSettings() {
   const silence = parseInt(document.getElementById('silenceDurationInput').value) || 1500;
   const threshold = parseFloat(document.getElementById('speechThresholdInput').value) || 1000;
   const requestTimeout = parseInt(document.getElementById('requestTimeoutInput').value) || 120000;
+  const localTts = document.getElementById('localTtsToggle').checked;
+  const ttsSpeed = parseFloat(document.getElementById('ttsSpeedInput').value) || 1.1;
   
   try {
     if (url) {
@@ -817,6 +838,10 @@ function saveSettings() {
     state.speechThreshold = threshold;
     
     AudioBridge.setRequestTimeout(requestTimeout);
+    
+    AudioBridge.setLocalTtsEnabled(localTts);
+    
+    AudioBridge.setTtsSpeed(ttsSpeed);
     
     log('Settings updated successfully');
   } catch(e) {
