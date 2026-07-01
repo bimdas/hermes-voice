@@ -185,7 +185,7 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
                 val conn = url.openConnection() as java.net.HttpURLConnection
                 conn.requestMethod = "POST"
                 conn.connectTimeout = 10000
-                conn.readTimeout = 120000
+                conn.readTimeout = getRequestTimeout().toInt()
                 conn.doOutput = true
                 conn.doInput = true
                 conn.setRequestProperty("Content-Type", mimeType)
@@ -446,6 +446,18 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
     fun setSpeechThreshold(threshold: Float) {
         val prefs = activity.getSharedPreferences("hermes_voice", android.content.Context.MODE_PRIVATE)
         prefs.edit().putFloat("speech_threshold", threshold).apply()
+    }
+
+    @JavascriptInterface
+    fun getRequestTimeout(): Long {
+        val prefs = activity.getSharedPreferences("hermes_voice", android.content.Context.MODE_PRIVATE)
+        return prefs.getLong("request_timeout", 120000L)
+    }
+
+    @JavascriptInterface
+    fun setRequestTimeout(timeoutMs: Long) {
+        val prefs = activity.getSharedPreferences("hermes_voice", android.content.Context.MODE_PRIVATE)
+        prefs.edit().putLong("request_timeout", timeoutMs).apply()
     }
 
     @JavascriptInterface

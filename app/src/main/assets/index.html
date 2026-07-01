@@ -488,6 +488,11 @@ input:checked + .slider:before {
       <label>Speech Threshold (Volume)</label>
       <input type="number" id="speechThresholdInput" placeholder="1000" min="100" max="5000">
     </div>
+
+    <div class="settings-field">
+      <label>Request Timeout (ms)</label>
+      <input type="number" id="requestTimeoutInput" placeholder="120000" min="10000" max="300000">
+    </div>
     
     <button class="settings-btn" onclick="saveSettings()">Save</button>
     <button class="settings-btn" style="background:rgba(255,255,255,0.06);color:#f1f5f9;margin-top:10px;box-shadow:none;" onclick="closeSettings()">Cancel</button>
@@ -778,6 +783,7 @@ function openSettings() {
     document.getElementById('vadToggle').checked = AudioBridge.isVadEnabled();
     document.getElementById('silenceDurationInput').value = AudioBridge.getSilenceDuration();
     document.getElementById('speechThresholdInput').value = AudioBridge.getSpeechThreshold();
+    document.getElementById('requestTimeoutInput').value = AudioBridge.getRequestTimeout();
   } catch(e) {
     log('Failed loading settings to UI: ' + e.message);
   }
@@ -793,6 +799,7 @@ function saveSettings() {
   const vad = document.getElementById('vadToggle').checked;
   const silence = parseInt(document.getElementById('silenceDurationInput').value) || 1500;
   const threshold = parseFloat(document.getElementById('speechThresholdInput').value) || 1000;
+  const requestTimeout = parseInt(document.getElementById('requestTimeoutInput').value) || 120000;
   
   try {
     if (url) {
@@ -808,6 +815,8 @@ function saveSettings() {
     
     AudioBridge.setSpeechThreshold(threshold);
     state.speechThreshold = threshold;
+    
+    AudioBridge.setRequestTimeout(requestTimeout);
     
     log('Settings updated successfully');
   } catch(e) {
