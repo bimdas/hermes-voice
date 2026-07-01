@@ -43,7 +43,7 @@ log = logging.getLogger("voice-bridge")
 # ---------------------------------------------------------------------------
 # STT via Deepgram API (primary - fast cloud transcription)
 # ---------------------------------------------------------------------------
-def transcribe_deepgram(audio_path: str) -> str:
+def transcribe_deepgram(audio_path: str, content_type: str = "audio/wav") -> str:
     """Transcribe audio using Deepgram Nova-3 API."""
     import urllib.request
 
@@ -53,10 +53,11 @@ def transcribe_deepgram(audio_path: str) -> str:
     with open(audio_path, "rb") as f:
         audio_data = f.read()
 
+    # Deepgram auto-detects format from content-type
     url = "https://api.deepgram.com/v1/listen?model=nova-3&language=en&smart_format=true"
     req = urllib.request.Request(url, data=audio_data, method="POST")
     req.add_header("Authorization", f"Token {DEEPGRAM_API_KEY}")
-    req.add_header("Content-Type", "audio/wav")
+    req.add_header("Content-Type", content_type)
 
     with urllib.request.urlopen(req, timeout=15) as resp:
         result = json.loads(resp.read().decode())
@@ -225,13 +226,20 @@ def _generate_tts_cli(text: str, output_path: str) -> bool:
 # ---------------------------------------------------------------------------
 # Full pipeline: audio in -> (text, audio_path) out
 # ---------------------------------------------------------------------------
-def process_voice(audio_data: bytes) -> dict:
+def process_voice(audio_data: bytes, content_type: str = "audio/wav") -> dict:
     """Full voice pipeline: STT -> Chat -> TTS."""
     timings = {}
     result = {"text_in": "", "text_out": "", "audio_path": None, "timings": timings}
 
+    # Determine file extension from content type
+    ext = ".ogg"
+    if "mp4" in content_type or "aac" in content_type:
+        ext = ".mp4"
+    elif "wav" in content_type:
+        ext = ".wav"
+
     # Save incoming audio
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
         f.write(audio_data)
         audio_in_path = f.name
 
@@ -242,7 +250,7 @@ def process_voice(audio_data: bytes) -> dict:
 
         if DEEPGRAM_API_KEY:
             try:
-                user_text = transcribe_deepgram(audio_in_path)
+                user_text = transcribe_deepgram(audio_in_path, content_type)
                 timings["stt_method"] = "deepgram"
             except Exception as e:
                 log.warning(f"Deepgram STT failed ({e}), falling back to local whisper")
@@ -382,10 +390,12 @@ class VoiceHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "No audio data"})
                 return
 
-            audio_data = self.rfile.read(content_length)
-            log.info(f"Received {len(audio_data)} bytes of audio")
+            content_type = self.headers.get("Content-Type", "audio/wav")
 
-            result = process_voice(audio_data)
+            audio_data = self.rfile.read(content_length)
+            log.info(f"Received {len(audio_data)} bytes of audio ({content_type})")
+
+            result = process_voice(audio_data, content_type)
 
             def safe(text, max_len=400):
                 return text.replace("\n", " ").replace("\r", "")[:max_len]
