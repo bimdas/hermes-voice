@@ -15,7 +15,7 @@ import java.util.Locale
 class AudioBridge(private val activity: MainActivity, private val webView: WebView) {
 
     private var mediaRecorder: MediaRecorder? = null
-    private var isRecording = false
+    @Volatile private var isRecording = false
     private var recordingThread: Thread? = null
     private var tempAudioFile: java.io.File? = null
     private var currentMimeType = "audio/wav"
@@ -31,7 +31,7 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
     // Android TTS engine
     private var tts: TextToSpeech? = null
     private var ttsReady = false
-    private var ttsEngine = "com.google.android.tts" // Google TTS default
+    private var ttsEngine: String? = null // default to system engine
 
     init {
         initTts()
@@ -96,35 +96,39 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
             recordingThread = Thread {
                 var lastAmplitudeUpdate = 0L
                 while (isRecording) {
-                    val maxAmp = mediaRecorder?.maxAmplitude ?: 0
-                    val rms = maxAmp.toDouble()
+                    try {
+                        val maxAmp = mediaRecorder?.maxAmplitude ?: 0
+                        val rms = maxAmp.toDouble()
 
-                    val now = System.currentTimeMillis()
-                    if (now - lastAmplitudeUpdate > 50) {
-                        lastAmplitudeUpdate = now
-                        activity.runOnUiThread {
-                            webView.evaluateJavascript("if (window.onMicVolume) window.onMicVolume($rms);", null)
-                        }
-                    }
-
-                    if (vadEnabled) {
-                        if (rms > speechThreshold) {
-                            if (!hasSpoken) {
-                                hasSpoken = true
-                                activity.runOnUiThread {
-                                    webView.evaluateJavascript("if (window.onSpeechStarted) window.onSpeechStarted();", null)
-                                }
-                            }
-                            lastActiveTime = now
-                        } else if (hasSpoken) {
-                            if (now - lastActiveTime > silenceDurationMs) {
-                                activity.runOnUiThread {
-                                    webView.evaluateJavascript("if (window.onVadSilenceTriggered) window.onVadSilenceTriggered();", null)
-                                }
-                                stopAndSendNativeInternal()
-                                hasSpoken = false
+                        val now = System.currentTimeMillis()
+                        if (now - lastAmplitudeUpdate > 50) {
+                            lastAmplitudeUpdate = now
+                            activity.runOnUiThread {
+                                webView.evaluateJavascript("if (window.onMicVolume) window.onMicVolume($rms);", null)
                             }
                         }
+
+                        if (vadEnabled) {
+                            if (rms > speechThreshold) {
+                                if (!hasSpoken) {
+                                    hasSpoken = true
+                                    activity.runOnUiThread {
+                                        webView.evaluateJavascript("if (window.onSpeechStarted) window.onSpeechStarted();", null)
+                                    }
+                                }
+                                lastActiveTime = now
+                            } else if (hasSpoken) {
+                                if (now - lastActiveTime > silenceDurationMs) {
+                                    activity.runOnUiThread {
+                                        webView.evaluateJavascript("if (window.onVadSilenceTriggered) window.onVadSilenceTriggered();", null)
+                                    }
+                                    stopAndSendNativeInternal()
+                                    hasSpoken = false
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // MediaRecorder might have been stopped/released by another thread
                     }
 
                     try {
@@ -178,27 +182,38 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
         isRecording = false
 
         Thread {
+            var fileData: ByteArray? = null
+            var mime: String? = null
             try {
                 recordingThread?.interrupt()
                 recordingThread?.join(2000)
                 mediaRecorder?.stop()
-                mediaRecorder?.release()
+            } catch (e: Exception) {
+                // Log or handle stop exception safely
+            } finally {
+                try {
+                    mediaRecorder?.release()
+                } catch (e: Exception) {}
                 mediaRecorder = null
 
                 val file = tempAudioFile
                 if (file != null && file.exists()) {
-                    val compressedData = file.readBytes()
-                    file.delete()
-                    tempAudioFile = null
-                    sendAudioToBridge(compressedData, currentMimeType)
-                } else {
-                    activity.runOnUiThread {
-                        webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('No audio recorded file found');", null)
+                    if (file.length() > 0) {
+                        try {
+                            fileData = file.readBytes()
+                            mime = currentMimeType
+                        } catch (e: Exception) {}
                     }
+                    file.delete()
                 }
-            } catch (e: Exception) {
+                tempAudioFile = null
+            }
+
+            if (fileData != null && mime != null) {
+                sendAudioToBridge(fileData, mime)
+            } else {
                 activity.runOnUiThread {
-                    webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('Stop failed: ${e.message}');", null)
+                    webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('No audio recorded file found');", null)
                 }
             }
         }.start()
@@ -439,17 +454,69 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
         }
     }
 
+    private fun routeToSpeaker(enabled: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (enabled) {
+                val devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                val speakerDevice = devices.find { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                if (speakerDevice != null) {
+                    audioManager.setCommunicationDevice(speakerDevice)
+                }
+            } else {
+                val currentDevice = audioManager.communicationDevice
+                if (currentDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                    audioManager.clearCommunicationDevice()
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.isSpeakerphoneOn = enabled
+        }
+    }
+
+    private fun routeToBluetooth(enabled: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (enabled) {
+                val devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                val bluetoothDevice = devices.find {
+                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                    it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
+                }
+                if (bluetoothDevice != null) {
+                    audioManager.setCommunicationDevice(bluetoothDevice)
+                }
+            } else {
+                val currentDevice = audioManager.communicationDevice
+                if (currentDevice?.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                    currentDevice?.type == AudioDeviceInfo.TYPE_BLE_HEADSET) {
+                    audioManager.clearCommunicationDevice()
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            if (enabled) {
+                audioManager.startBluetoothSco()
+                @Suppress("DEPRECATION")
+                audioManager.isBluetoothScoOn = true
+            } else {
+                audioManager.stopBluetoothSco()
+                @Suppress("DEPRECATION")
+                audioManager.isBluetoothScoOn = false
+            }
+        }
+    }
+
     @JavascriptInterface
     fun setSpeakerEnabled(enabled: Boolean) {
         speakerEnabled = enabled
-        audioManager.isSpeakerphoneOn = enabled
 
         if (enabled) {
             bluetoothEnabled = false
-            audioManager.stopBluetoothSco()
-            audioManager.isBluetoothScoOn = false
+            routeToBluetooth(false)
             audioManager.mode = android.media.AudioManager.MODE_NORMAL
+            routeToSpeaker(true)
         } else {
+            routeToSpeaker(false)
             audioManager.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
         }
     }
@@ -459,13 +526,11 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
         bluetoothEnabled = enabled
         if (enabled) {
             speakerEnabled = false
-            audioManager.isSpeakerphoneOn = false
+            routeToSpeaker(false)
             audioManager.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
-            audioManager.startBluetoothSco()
-            audioManager.isBluetoothScoOn = true
+            routeToBluetooth(true)
         } else {
-            audioManager.stopBluetoothSco()
-            audioManager.isBluetoothScoOn = false
+            routeToBluetooth(false)
             if (!speakerEnabled) {
                 audioManager.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
             }

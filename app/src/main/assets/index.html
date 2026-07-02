@@ -600,6 +600,7 @@ function toggleRecording() {
 
 function startListening() {
   try {
+    AudioBridge.stopAudio();
     const result = AudioBridge.startRecording();
     if (result === 'ok') {
       state.isRecording = true;
