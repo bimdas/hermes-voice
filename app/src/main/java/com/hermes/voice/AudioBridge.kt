@@ -4,6 +4,7 @@ import android.media.*
 import android.media.AudioRecord
 import android.os.Build
 import android.speech.tts.TextToSpeech
+import android.util.Log
 import android.util.Base64
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -222,6 +223,13 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
     }
 
     private fun sendAudioToBridge(audioData: ByteArray, mimeType: String) {
+        // If Kokoro mode, use streaming endpoint for low-latency sentence-by-sentence TTS
+        val mode = getTtsMode()
+        if (mode == "kokoro" && isLocalTtsEnabled()) {
+            sendAudioToBridgeStreaming(audioData, mimeType)
+            return
+        }
+
         Thread {
             try {
                 val bridgeUrl = getBridgeUrl()
@@ -257,13 +265,8 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
                             val escAssistant = JSONObject.quote(assistantResponse)
                             webView.evaluateJavascript("if (window.onBridgeSuccess) window.onBridgeSuccess($escUser, $escAssistant);", null)
 
-                            // Speak locally via Android TTS or Kokoro Local
-                            val mode = getTtsMode()
-                            if (mode == "kokoro") {
-                                speakKokoroLocal(assistantResponse)
-                            } else {
-                                speakText(assistantResponse)
-                            }
+                            // Speak locally via Android TTS
+                            speakText(assistantResponse)
                         }
                     } else {
                         // Legacy mode: server returned audio
@@ -290,6 +293,225 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
                 activity.runOnUiThread {
                     webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('$errorMsg');", null)
                 }
+            }
+        }.start()
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming Kokoro TTS — sentence-by-sentence synthesis over SSE
+    // -----------------------------------------------------------------------
+
+    @Volatile private var isStreamingPlayback = false
+    private val ttsQueue = java.util.concurrent.LinkedBlockingQueue<ByteArray?>()
+    private var audioTrack: android.media.AudioTrack? = null
+
+    private fun sendAudioToBridgeStreaming(audioData: ByteArray, mimeType: String) {
+        Thread {
+            try {
+                val bridgeUrl = getBridgeUrl()
+                val url = java.net.URL("$bridgeUrl/voice/stream?tts=false")
+                val conn = url.openConnection() as java.net.HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.connectTimeout = 10000
+                conn.readTimeout = getRequestTimeout().toInt()
+                conn.doOutput = true
+                conn.doInput = true
+                conn.setRequestProperty("Content-Type", mimeType)
+
+                conn.outputStream.use { os ->
+                    os.write(audioData)
+                    os.flush()
+                }
+
+                val responseCode = conn.responseCode
+                if (responseCode != 200) {
+                    val errorMsg = "Stream returned code $responseCode"
+                    activity.runOnUiThread {
+                        webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('$errorMsg');", null)
+                    }
+                    return@Thread
+                }
+
+                // Notify UI that we're processing
+                activity.runOnUiThread {
+                    webView.evaluateJavascript("if (window.onAudioPlayStarted) window.onAudioPlayStarted();", null)
+                }
+
+                // Init Kokoro engine once (before streaming)
+                initSherpaTts()
+                val tts = sherpaTts
+                if (tts == null) {
+                    val errorMsg = "Kokoro TTS init failed"
+                    activity.runOnUiThread {
+                        webView.evaluateJavascript("if (window.onAudioError) window.onAudioError('$errorMsg');", null)
+                    }
+                    return@Thread
+                }
+
+                // Start playback thread (consumes PCM queue)
+                startQueuePlayback()
+
+                var userTranscript = ""
+                val fullResponse = StringBuilder()
+
+                // Read SSE stream
+                conn.inputStream.bufferedReader().use { reader ->
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) {
+                        val l = line ?: continue
+                        if (!l.startsWith("data: ")) continue
+
+                        val jsonStr = l.removePrefix("data: ").trim()
+                        if (jsonStr.isEmpty()) continue
+
+                        try {
+                            val event = JSONObject(jsonStr)
+                            when (event.optString("event")) {
+                                "transcript" -> {
+                                    userTranscript = event.optString("text", "")
+                                    activity.runOnUiThread {
+                                        val esc = JSONObject.quote(userTranscript)
+                                        webView.evaluateJavascript("if (window.onBridgeSuccess) window.onBridgeSuccess($esc, '');", null)
+                                    }
+                                }
+                                "sentence" -> {
+                                    val sentence = event.optString("text", "").trim()
+                                    if (sentence.isNotEmpty()) {
+                                        fullResponse.append(sentence).append(" ")
+                                        // Update UI with partial response
+                                        activity.runOnUiThread {
+                                            val esc = JSONObject.quote(fullResponse.toString().trim())
+                                            webView.evaluateJavascript("if (window.onBridgeSuccess) window.onBridgeSuccess(${JSONObject.quote(userTranscript)}, $esc);", null)
+                                        }
+                                        // Synthesize this sentence immediately
+                                        synthesizeAndQueue(tts, sentence)
+                                    }
+                                }
+                                "done" -> {
+                                    // Final response — already handled sentence by sentence
+                                    val finalText = event.optString("text_out", fullResponse.toString().trim())
+                                    Log.i("AudioBridge", "[stream-kokoro] Done: ${finalText.take(80)}")
+                                }
+                                "error" -> {
+                                    val errText = event.optString("text", "Unknown error")
+                                    activity.runOnUiThread {
+                                        webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('$errText');", null)
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.w("AudioBridge", "[stream-kokoro] Parse error: $e")
+                        }
+                    }
+                }
+
+                // Signal playback thread that we're done
+                ttsQueue.put(null)
+
+            } catch (e: Exception) {
+                val errorMsg = e.message ?: "Unknown error"
+                activity.runOnUiThread {
+                    webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('$errorMsg');", null)
+                }
+                ttsQueue.put(null) // unblock playback thread
+            }
+        }.start()
+    }
+
+    private fun synthesizeAndQueue(tts: OfflineTts, text: String) {
+        try {
+            val voiceStr = getKokoroVoice()
+            val sid = when (voiceStr) {
+                "af_bella" -> 0
+                "af_sarah" -> 1
+                "af_nicole" -> 2
+                "af_sky" -> 3
+                "am_adam" -> 4
+                "am_michael" -> 5
+                "bf_emma" -> 6
+                "bf_isabella" -> 7
+                "bm_george" -> 8
+                "bm_lewis" -> 9
+                "af_julia" -> 10
+                else -> 0
+            }
+            val speed = getKokoroSpeed()
+
+            val audio = tts.generate(text = text, sid = sid, speed = speed)
+            // Convert float samples to PCM16 bytes directly (no WAV header needed for AudioTrack)
+            val pcmData = ByteArray(audio.samples.size * 2)
+            for (i in audio.samples.indices) {
+                val sample = Math.max(-1.0f, Math.min(1.0f, audio.samples[i]))
+                val intSample = (sample * 32767).toInt().toShort()
+                pcmData[i * 2] = (intSample.toInt() and 0xff).toByte()
+                pcmData[i * 2 + 1] = ((intSample.toInt() shr 8) and 0xff).toByte()
+            }
+            ttsQueue.put(pcmData)
+        } catch (e: Exception) {
+            Log.e("AudioBridge", "[kokoro] Synth error: ${e.message}")
+        }
+    }
+
+    private fun startQueuePlayback() {
+        if (isStreamingPlayback) return
+        isStreamingPlayback = true
+
+        Thread {
+            try {
+                val sampleRate = 24000 // Kokoro output sample rate
+                val bufSize = android.media.AudioTrack.getMinBufferSize(
+                    sampleRate,
+                    android.media.AudioFormat.CHANNEL_OUT_MONO,
+                    android.media.AudioFormat.ENCODING_PCM_16BIT
+                )
+
+                val track = android.media.AudioTrack.Builder()
+                    .setAudioAttributes(
+                        android.media.AudioAttributes.Builder()
+                            .setUsage(
+                                if (speakerEnabled) android.media.AudioAttributes.USAGE_MEDIA
+                                else android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION
+                            )
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        android.media.AudioFormat.Builder()
+                            .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_MONO)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(maxOf(bufSize, 4096))
+                    .setTransferMode(android.media.AudioTrack.MODE_STREAM)
+                    .build()
+
+                audioTrack = track
+                track.play()
+
+                while (true) {
+                    val pcm = ttsQueue.take() // blocks until available
+                    if (pcm == null) break // null = done signal
+                    track.write(pcm, 0, pcm.size)
+                }
+
+                // Wait for last samples to play out
+                Thread.sleep(100)
+                track.stop()
+                track.release()
+                audioTrack = null
+
+                activity.runOnUiThread {
+                    webView.evaluateJavascript("if (window.onAudioPlayCompleted) window.onAudioPlayCompleted();", null)
+                }
+            } catch (e: Exception) {
+                Log.e("AudioBridge", "[kokoro-playback] Error: ${e.message}")
+                activity.runOnUiThread {
+                    webView.evaluateJavascript("if (window.onAudioPlayCompleted) window.onAudioPlayCompleted();", null)
+                }
+            } finally {
+                isStreamingPlayback = false
+                ttsQueue.clear()
             }
         }.start()
     }
@@ -336,6 +558,19 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
     @JavascriptInterface
     fun stopSpeaking() {
         tts?.stop()
+        // Stop streaming Kokoro playback
+        ttsQueue.clear()
+        ttsQueue.put(null) // unblock playback thread
+        try {
+            audioTrack?.pause()
+            audioTrack?.flush()
+            audioTrack?.stop()
+            audioTrack?.release()
+        } catch (e: Exception) {
+            // Ignore
+        }
+        audioTrack = null
+        isStreamingPlayback = false
     }
 
     private fun playAudioBytes(audioBytes: ByteArray) {
