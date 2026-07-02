@@ -421,19 +421,22 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
     private fun synthesizeAndQueue(tts: OfflineTts, text: String) {
         try {
             val voiceStr = getKokoroVoice()
+            // Official sid mapping from sherpa-onnx kokoro-en-v0_19:
+            // 0->af, 1->af_bella, 2->af_nicole, 3->af_sarah, 4->af_sky,
+            // 5->am_adam, 6->am_michael, 7->bf_emma, 8->bf_isabella,
+            // 9->bm_george, 10->bm_lewis
             val sid = when (voiceStr) {
-                "af_bella" -> 0
-                "af_sarah" -> 1
+                "af_bella" -> 1
                 "af_nicole" -> 2
-                "af_sky" -> 3
-                "am_adam" -> 4
-                "am_michael" -> 5
-                "bf_emma" -> 6
-                "bf_isabella" -> 7
-                "bm_george" -> 8
-                "bm_lewis" -> 9
-                "af_julia" -> 10
-                else -> 0
+                "af_sarah" -> 3
+                "af_sky" -> 4
+                "am_adam" -> 5
+                "am_michael" -> 6
+                "bf_emma" -> 7
+                "bf_isabella" -> 8
+                "bm_george" -> 9
+                "bm_lewis" -> 10
+                else -> 0  // af (default female)
             }
             val speed = getKokoroSpeed()
 
@@ -1144,18 +1147,18 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
                 val tts = sherpaTts ?: throw IllegalStateException("Offline TTS initialization failed")
 
                 val voiceStr = getKokoroVoice()
+                // Official sid mapping from sherpa-onnx kokoro-en-v0_19
                 val sid = when (voiceStr) {
-                    "af_bella" -> 0
-                    "af_sarah" -> 1
+                    "af_bella" -> 1
                     "af_nicole" -> 2
-                    "af_sky" -> 3
-                    "am_adam" -> 4
-                    "am_michael" -> 5
-                    "bf_emma" -> 6
-                    "bf_isabella" -> 7
-                    "bm_george" -> 8
-                    "bm_lewis" -> 9
-                    "af_julia" -> 10
+                    "af_sarah" -> 3
+                    "af_sky" -> 4
+                    "am_adam" -> 5
+                    "am_michael" -> 6
+                    "bf_emma" -> 7
+                    "bf_isabella" -> 8
+                    "bm_george" -> 9
+                    "bm_lewis" -> 10
                     else -> 0
                 }
                 val speed = getKokoroSpeed()
