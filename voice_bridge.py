@@ -40,6 +40,14 @@ LISTEN_PORT = int(os.getenv("VOICE_BRIDGE_PORT", "8700"))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("voice-bridge")
 
+# Load voice-optimized system prompt (injected into every chat call)
+VOICE_SYSTEM_PROMPT = ""
+_voice_prompt_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice_system_prompt.txt")
+if os.path.exists(_voice_prompt_path):
+    with open(_voice_prompt_path, "r") as f:
+        VOICE_SYSTEM_PROMPT = f.read().strip()
+    log.info(f"Voice system prompt loaded ({len(VOICE_SYSTEM_PROMPT)} chars)")
+
 # ---------------------------------------------------------------------------
 # STT via Deepgram API (primary - fast cloud transcription)
 # ---------------------------------------------------------------------------
@@ -137,6 +145,8 @@ def chat_hermes(message: str, session_id: str = None) -> str:
         "messages": [{"role": "user", "content": message}],
         "stream": False,
     }
+    if VOICE_SYSTEM_PROMPT:
+        payload["messages"].append({"role": "system", "content": VOICE_SYSTEM_PROMPT})
     if session_id:
         headers["X-Hermes-Session-Id"] = session_id
 
