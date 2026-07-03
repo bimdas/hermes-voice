@@ -224,7 +224,13 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
             }
 
             if (fileData != null && mime != null) {
-                sendAudioToBridge(fileData, mime)
+                // Use SSE streaming for Kokoro (3-thread pipeline), legacy for others
+                val ttsMode = getTtsMode()
+                if (ttsMode == "kokoro") {
+                    sendAudioToBridgeStreaming(fileData, mime)
+                } else {
+                    sendAudioToBridge(fileData, mime)
+                }
             } else {
                 activity.runOnUiThread {
                     webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('No audio recorded file found');", null)
