@@ -407,6 +407,95 @@ input:checked + .slider:before {
   border: 1px solid rgba(255,255,255,0.05);
 }
 .debug-log.visible { display: block; }
+
+/* History Overlay */
+.history-overlay {
+  display: none; position: fixed;
+  top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(4, 4, 8, 0.96); z-index: 100;
+  backdrop-filter: blur(15px);
+  flex-direction: column; align-items: center;
+  padding: 30px 20px;
+}
+.history-overlay.visible { display: flex; }
+.history-overlay h2 {
+  font-size: 20px; font-weight: 500;
+  color: #ffffff; margin-bottom: 20px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  text-shadow: 0 0 15px rgba(255,255,255,0.1);
+}
+.history-list {
+  width: 100%; max-width: 400px;
+  flex: 1; overflow-y: auto;
+  display: flex; flex-direction: column;
+  gap: 8px; padding-right: 5px;
+}
+.history-list::-webkit-scrollbar { width: 3px; }
+.history-list::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.1);
+  border-radius: 10px;
+}
+.session-item {
+  padding: 14px 16px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex; flex-direction: column; gap: 4px;
+  position: relative;
+}
+.session-item:active {
+  transform: scale(0.98);
+  background: rgba(56, 189, 248, 0.08);
+}
+.session-item .session-time {
+  font-size: 10px; color: rgba(255,255,255,0.3);
+  text-transform: uppercase; letter-spacing: 0.8px;
+}
+.session-item .session-preview {
+  font-size: 13px; color: rgba(255,255,255,0.7);
+  line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.session-item .session-msg-count {
+  font-size: 10px; color: rgba(255,255,255,0.2);
+}
+.session-delete {
+  position: absolute; top: 8px; right: 8px;
+  width: 24px; height: 24px;
+  border-radius: 50%; border: none;
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444; font-size: 14px;
+  cursor: pointer; display: flex;
+  align-items: center; justify-content: center;
+  opacity: 0; transition: opacity 0.2s;
+}
+.session-item:hover .session-delete,
+.session-item:active .session-delete { opacity: 1; }
+.history-empty {
+  text-align: center; color: rgba(255,255,255,0.3);
+  font-size: 14px; margin-top: 60px;
+}
+.history-close {
+  margin-top: 15px; padding: 10px 30px;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 10px; background: rgba(255,255,255,0.03);
+  color: rgba(255,255,255,0.6); font-size: 13px;
+  cursor: pointer; font-family: inherit;
+}
+.history-btn {
+  position: absolute; top: 22px; left: 22px;
+  width: 38px; height: 38px; border: none;
+  background: rgba(255,255,255,0.02);
+  border-radius: 50%; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  z-index: 10;
+  border: 1px solid rgba(255,255,255,0.04);
+}
+.history-btn svg { width: 18px; height: 18px; fill: rgba(255,255,255,0.3); }
 </style>
 </head>
 <body>
@@ -463,6 +552,9 @@ input:checked + .slider:before {
     </button>
   </div>
 
+  <button class="history-btn" onclick="openHistory()">
+    <svg viewBox="0 0 24 24"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+  </button>
   <button class="gear-btn" onclick="openSettings()">
     <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
   </button>
@@ -547,6 +639,12 @@ input:checked + .slider:before {
   </div>
 </div>
 
+<div class="history-overlay" id="historyOverlay">
+  <h2>Session History</h2>
+  <div class="history-list" id="historyList"></div>
+  <button class="history-close" onclick="closeHistory()">Close</button>
+</div>
+
 <div class="debug-log" id="debugLog"></div>
 
 <script>
@@ -560,7 +658,9 @@ const state = {
   vadEnabled: false,
   silenceDuration: 1500,
   speechThreshold: 1000,
-  callSessionActive: false
+  callSessionActive: false,
+  currentSession: null, // {id, started, messages: [{role, text, time}]}
+  messages: [] // current session messages
 };
 
 const mainBtn = document.getElementById('mainButton');
@@ -773,6 +873,148 @@ function addMessage(role, text) {
     top: chatHistory.scrollHeight,
     behavior: 'smooth'
   });
+
+  // Persist to session
+  try {
+    if (!state.currentSession) {
+      state.currentSession = {
+        id: 'sess_' + Date.now(),
+        started: new Date().toISOString(),
+        messages: []
+      };
+    }
+    state.currentSession.messages.push({
+      role: role,
+      text: text,
+      time: new Date().toISOString()
+    });
+    saveCurrentSession();
+  } catch(e) {
+    log('Session save error: ' + e.message);
+  }
+}
+
+function saveCurrentSession() {
+  try {
+    if (state.currentSession && state.currentSession.messages.length > 0) {
+      AudioBridge.saveSession(JSON.stringify(state.currentSession));
+    }
+  } catch(e) {
+    log('saveSession error: ' + e.message);
+  }
+}
+
+function openHistory() {
+  try {
+    const sessionsJson = AudioBridge.loadSessions();
+    const sessions = JSON.parse(sessionsJson);
+    const list = document.getElementById('historyList');
+    list.innerHTML = '';
+
+    if (sessions.length === 0) {
+      list.innerHTML = '<div class="history-empty">No previous sessions</div>';
+    } else {
+      // Sort newest first
+      sessions.sort((a, b) => new Date(b.started) - new Date(a.started));
+      sessions.forEach(function(session) {
+        const item = document.createElement('div');
+        item.className = 'session-item';
+
+        const time = new Date(session.started);
+        const timeStr = time.toLocaleDateString() + ' ' + time.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+        
+        // Get preview from first user message
+        var preview = 'Empty session';
+        if (session.messages && session.messages.length > 0) {
+          const userMsg = session.messages.find(m => m.role === 'user');
+          if (userMsg) preview = userMsg.text;
+          else preview = session.messages[0].text;
+        }
+
+        const msgCount = session.messages ? session.messages.length : 0;
+
+        item.innerHTML = '<div class="session-time">' + timeStr + '</div>' +
+          '<div class="session-preview">' + escapeHtml(preview) + '</div>' +
+          '<div class="session-msg-count">' + msgCount + ' messages</div>' +
+          '<button class="session-delete" onclick="event.stopPropagation(); deleteSessionItem(\'' + session.id + '\')">&times;</button>';
+
+        item.onclick = function() { loadSession(session); };
+        list.appendChild(item);
+      });
+    }
+  } catch(e) {
+    log('openHistory error: ' + e.message);
+  }
+  document.getElementById('historyOverlay').classList.add('visible');
+}
+
+function closeHistory() {
+  document.getElementById('historyOverlay').classList.remove('visible');
+}
+
+function loadSession(session) {
+  // If currently in a call, end it first
+  if (state.callSessionActive) {
+    endCallQuiet();
+  }
+
+  // Start a new call session
+  startCallSession();
+
+  // Restore session
+  state.currentSession = {
+    id: session.id,
+    started: session.started,
+    messages: session.messages || []
+  };
+
+  // Re-render messages
+  chatHistory.innerHTML = '';
+  if (session.messages) {
+    session.messages.forEach(function(msg) {
+      const bubble = document.createElement('div');
+      bubble.className = 'chat-bubble ' + msg.role;
+      bubble.textContent = msg.text;
+      chatHistory.appendChild(bubble);
+    });
+    chatHistory.scrollTo({ top: chatHistory.scrollHeight, behavior: 'smooth' });
+  }
+
+  closeHistory();
+  setStatus('idle', 'Session resumed');
+  log('Loaded session: ' + session.id + ' (' + (session.messages ? session.messages.length : 0) + ' msgs)');
+}
+
+function deleteSessionItem(sessionId) {
+  try {
+    AudioBridge.deleteSession(sessionId);
+    // Refresh the list
+    openHistory();
+    // If we deleted the current session, clear it
+    if (state.currentSession && state.currentSession.id === sessionId) {
+      state.currentSession = null;
+    }
+  } catch(e) {
+    log('deleteSession error: ' + e.message);
+  }
+}
+
+function endCallQuiet() {
+  // End call without clearing UI (used when loading a session)
+  if (state.isRecording) {
+    state.isRecording = false;
+    try { AudioBridge.stopRecording(); } catch(e) {}
+  }
+  try { AudioBridge.stopAudio(); } catch(e) {}
+  try { AudioBridge.stopForegroundService(); } catch(e) {}
+  state.callSessionActive = false;
+  bottomBar.classList.remove('active');
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
 }
 
 function toggleMute() {
@@ -811,6 +1053,9 @@ function toggleBluetooth() {
 }
 
 function endCall() {
+  // Save session before ending
+  saveCurrentSession();
+
   if (state.isRecording) {
     state.isRecording = false;
     AudioBridge.stopRecording();
@@ -824,6 +1069,8 @@ function endCall() {
   }
   
   state.callSessionActive = false;
+  state.currentSession = null;
+  state.messages = [];
   bottomBar.classList.remove('active');
   setStatus('idle', 'Tap to connect');
   chatHistory.innerHTML = '';

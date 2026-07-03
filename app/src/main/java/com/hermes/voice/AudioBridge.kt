@@ -158,8 +158,16 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
         try {
             recordingThread?.interrupt()
             recordingThread?.join(2000)
-            mediaRecorder?.stop()
-            mediaRecorder?.release()
+            try {
+                mediaRecorder?.stop()
+            } catch (e: Exception) {
+                Log.w("AudioBridge", "MediaRecorder.stop() failed: ${e.message}")
+            }
+            try {
+                mediaRecorder?.release()
+            } catch (e: Exception) {
+                Log.w("AudioBridge", "MediaRecorder.release() failed: ${e.message}")
+            }
             mediaRecorder = null
 
             val file = tempAudioFile
@@ -171,6 +179,9 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
             }
             return ""
         } catch (e: Exception) {
+            Log.e("AudioBridge", "stopRecording error: ${e.message}")
+            try { mediaRecorder?.release() } catch (_: Exception) {}
+            mediaRecorder = null
             return ""
         }
     }
@@ -223,13 +234,6 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
     }
 
     private fun sendAudioToBridge(audioData: ByteArray, mimeType: String) {
-        // If Kokoro mode, use streaming endpoint for low-latency sentence-by-sentence TTS
-        val mode = getTtsMode()
-        if (mode == "kokoro" && isLocalTtsEnabled()) {
-            sendAudioToBridgeStreaming(audioData, mimeType)
-            return
-        }
-
         Thread {
             try {
                 val bridgeUrl = getBridgeUrl()
@@ -265,8 +269,20 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
                             val escAssistant = JSONObject.quote(assistantResponse)
                             webView.evaluateJavascript("if (window.onBridgeSuccess) window.onBridgeSuccess($escUser, $escAssistant);", null)
 
-                            // Speak locally via Android TTS
-                            speakText(assistantResponse)
+                            // Speak locally - use Kokoro if selected, otherwise system TTS
+                            try {
+                                val ttsMode = getTtsMode()
+                                if (ttsMode == "kokoro") {
+                                    speakKokoroLocal(assistantResponse)
+                                } else {
+                                    speakText(assistantResponse)
+                                }
+                            } catch (e: Exception) {
+                                Log.e("AudioBridge", "TTS error: ${e.message}")
+                                try {
+                                    webView.evaluateJavascript("if (window.onAudioError) window.onAudioError('TTS failed: ${e.message}');", null)
+                                } catch (_: Exception) {}
+                            }
                         }
                     } else {
                         // Legacy mode: server returned audio
@@ -289,9 +305,12 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
                     }
                 }
             } catch (e: Exception) {
-                val errorMsg = e.message ?: "Unknown error"
+                val errorMsg = (e.message ?: "Unknown error").replace("'", "\\'").replace("\n", " ").take(200)
+                Log.e("AudioBridge", "sendAudioToBridge error: $errorMsg")
                 activity.runOnUiThread {
-                    webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('$errorMsg');", null)
+                    try {
+                        webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('$errorMsg');", null)
+                    } catch (_: Exception) {}
                 }
             }
         }.start()
@@ -1139,6 +1158,13 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
     private fun speakKokoroLocal(text: String) {
         Thread {
             try {
+                if (text.isBlank()) {
+                    activity.runOnUiThread {
+                        webView.evaluateJavascript("if (window.onAudioPlayCompleted) window.onAudioPlayCompleted();", null)
+                    }
+                    return@Thread
+                }
+
                 activity.runOnUiThread {
                     webView.evaluateJavascript("if (window.onAudioPlayStarted) window.onAudioPlayStarted();", null)
                 }
@@ -1170,12 +1196,85 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
                     playAudioBytes(wavBytes)
                 }
             } catch (e: Exception) {
-                val errorMsg = e.message ?: "Unknown Kokoro TTS error"
+                val errorMsg = (e.message ?: "Unknown Kokoro TTS error").replace("'", "\\'").take(200)
+                Log.e("AudioBridge", "Kokoro TTS error: $errorMsg")
                 activity.runOnUiThread {
-                    webView.evaluateJavascript("if (window.onAudioError) window.onAudioError('$errorMsg');", null)
+                    try {
+                        webView.evaluateJavascript("if (window.onAudioError) window.onAudioError('$errorMsg');", null)
+                        webView.evaluateJavascript("if (window.onAudioPlayCompleted) window.onAudioPlayCompleted();", null)
+                    } catch (_: Exception) {}
                 }
             }
         }.start()
+    }
+
+    // -----------------------------------------------------------------------
+    // Session persistence - save/load chat history
+    // -----------------------------------------------------------------------
+
+    @JavascriptInterface
+    fun saveSession(sessionJson: String) {
+        try {
+            val prefs = activity.getSharedPreferences("hermes_voice_sessions", android.content.Context.MODE_PRIVATE)
+            val existing = prefs.getString("sessions", "[]") ?: "[]"
+            val sessions = org.json.JSONArray(existing)
+
+            val newSession = JSONObject(sessionJson)
+            // Find and update existing session or add new one
+            var found = false
+            for (i in 0 until sessions.length()) {
+                val s = sessions.getJSONObject(i)
+                if (s.optString("id") == newSession.optString("id")) {
+                    sessions.put(i, newSession)
+                    found = true
+                    break
+                }
+            }
+            if (!found) {
+                sessions.put(newSession)
+            }
+
+            // Keep only the last 50 sessions
+            val trimmed = org.json.JSONArray()
+            val start = Math.max(0, sessions.length() - 50)
+            for (i in start until sessions.length()) {
+                trimmed.put(sessions.get(i))
+            }
+
+            prefs.edit().putString("sessions", trimmed.toString()).apply()
+        } catch (e: Exception) {
+            Log.e("AudioBridge", "saveSession error: ${e.message}")
+        }
+    }
+
+    @JavascriptInterface
+    fun loadSessions(): String {
+        return try {
+            val prefs = activity.getSharedPreferences("hermes_voice_sessions", android.content.Context.MODE_PRIVATE)
+            prefs.getString("sessions", "[]") ?: "[]"
+        } catch (e: Exception) {
+            Log.e("AudioBridge", "loadSessions error: ${e.message}")
+            "[]"
+        }
+    }
+
+    @JavascriptInterface
+    fun deleteSession(sessionId: String) {
+        try {
+            val prefs = activity.getSharedPreferences("hermes_voice_sessions", android.content.Context.MODE_PRIVATE)
+            val existing = prefs.getString("sessions", "[]") ?: "[]"
+            val sessions = org.json.JSONArray(existing)
+            val updated = org.json.JSONArray()
+            for (i in 0 until sessions.length()) {
+                val s = sessions.getJSONObject(i)
+                if (s.optString("id") != sessionId) {
+                    updated.put(s)
+                }
+            }
+            prefs.edit().putString("sessions", updated.toString()).apply()
+        } catch (e: Exception) {
+            Log.e("AudioBridge", "deleteSession error: ${e.message}")
+        }
     }
 
     @JavascriptInterface

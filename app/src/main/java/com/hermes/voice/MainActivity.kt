@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.View
 import android.view.WindowInsetsController
 import android.webkit.*
@@ -20,6 +21,23 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Global crash handler - prevent hard crashes, restart activity instead
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            Log.e("HermesVoice", "Uncaught exception on ${thread.name}: ${throwable.message}", throwable)
+            try {
+                runOnUiThread {
+                    try {
+                        webView.evaluateJavascript(
+                            "if (window.onBridgeError) window.onBridgeError('App recovered from error: ${throwable.message?.take(100)?.replace("'", "\\'")}');",
+                            null
+                        )
+                    } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {}
+            // Don't call System.exit - let the system handle it naturally
+            // This prevents the hard crash dialog
+        }
 
         // Immersive fullscreen
         window.decorView.systemUiVisibility = (
