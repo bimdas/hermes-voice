@@ -330,12 +330,35 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
     // -----------------------------------------------------------------------
 
     @Volatile private var isStreamingPlayback = false
-    private val textQueue = java.util.concurrent.LinkedBlockingQueue<String?>()   // text chunks from SSE
-    private val pcmQueue = java.util.concurrent.LinkedBlockingQueue<ByteArray?>()  // synthesized PCM
+    private var textQueue = java.util.concurrent.LinkedBlockingQueue<String?>()   // text chunks from SSE
+    private var pcmQueue = java.util.concurrent.LinkedBlockingQueue<ByteArray?>()  // synthesized PCM
     private var audioTrack: android.media.AudioTrack? = null
     private var synthesisThread: Thread? = null
 
+    // Stop any in-flight streaming pipeline and reset queues
+    private fun resetStreamingPipeline() {
+        // Signal old threads to stop
+        textQueue.clear()
+        textQueue.put(null)
+        pcmQueue.clear()
+        pcmQueue.put(null)
+        try {
+            audioTrack?.pause()
+            audioTrack?.flush()
+            audioTrack?.stop()
+            audioTrack?.release()
+        } catch (_: Exception) {}
+        audioTrack = null
+        // Create fresh queues so old threads can't interfere with new ones
+        textQueue = java.util.concurrent.LinkedBlockingQueue<String?>()
+        pcmQueue = java.util.concurrent.LinkedBlockingQueue<ByteArray?>()
+        isStreamingPlayback = false
+    }
+
     private fun sendAudioToBridgeStreaming(audioData: ByteArray, mimeType: String) {
+        // Reset any previous streaming session
+        resetStreamingPipeline()
+
         Thread {
             try {
                 val bridgeUrl = getBridgeUrl()
@@ -454,31 +477,44 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
 
     // Synthesis thread: takes text from textQueue, synthesizes with Kokoro, puts PCM into pcmQueue
     private fun startSynthesisThread(tts: OfflineTts) {
+        val voiceStr = getKokoroVoice()
+        val sid = when (voiceStr) {
+            "af_bella" -> 1
+            "af_nicole" -> 2
+            "af_sarah" -> 3
+            "af_sky" -> 4
+            "am_adam" -> 5
+            "am_michael" -> 6
+            "bf_emma" -> 7
+            "bf_isabella" -> 8
+            "bm_george" -> 9
+            "bm_lewis" -> 10
+            else -> 0  // af (default female)
+        }
+        val speed = getKokoroSpeed()
+        Log.i("AudioBridge", "[kokoro-synth] Starting: voice=$voiceStr sid=$sid speed=$speed")
+
+        // Capture local references to the queues at call time so stale threads
+        // from a previous session can't interfere with the new pipeline.
+        val myTextQueue = textQueue
+        val myPcmQueue = pcmQueue
+
         synthesisThread = Thread {
             try {
-                val voiceStr = getKokoroVoice()
-                val sid = when (voiceStr) {
-                    "af_bella" -> 1
-                    "af_nicole" -> 2
-                    "af_sarah" -> 3
-                    "af_sky" -> 4
-                    "am_adam" -> 5
-                    "am_michael" -> 6
-                    "bf_emma" -> 7
-                    "bf_isabella" -> 8
-                    "bm_george" -> 9
-                    "bm_lewis" -> 10
-                    else -> 0  // af (default female)
-                }
-                val speed = getKokoroSpeed()
+                // Build config once — sid is baked in so every call uses the same voice
+                val genConfig = com.k2fsa.sherpa.onnx.GenerationConfig(
+                    sid = sid,
+                    speed = speed,
+                )
 
+                var chunkIndex = 0
                 while (true) {
-                    val text = textQueue.take() // blocks until available
-                    if (text == null) break     // null = done signal
+                    val text = myTextQueue.take() // blocks until available
+                    if (text == null) break       // null = done signal
 
                     try {
                         val t0 = System.currentTimeMillis()
-                        val audio = tts.generate(text = text, sid = sid, speed = speed)
+                        val audio = tts.generateWithConfig(text = text, config = genConfig)
                         val synthTime = System.currentTimeMillis() - t0
 
                         // Convert float samples to PCM16 bytes
@@ -489,17 +525,18 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
                             pcmData[i * 2] = (intSample.toInt() and 0xff).toByte()
                             pcmData[i * 2 + 1] = ((intSample.toInt() shr 8) and 0xff).toByte()
                         }
-                        Log.d("AudioBridge", "[kokoro-synth] '${text.take(40)}...' in ${synthTime}ms -> ${pcmData.size} bytes")
-                        pcmQueue.put(pcmData)
+                        chunkIndex++
+                        Log.d("AudioBridge", "[kokoro-synth] #$chunkIndex '${text.take(40)}...' sid=$sid ${synthTime}ms -> ${pcmData.size}b")
+                        myPcmQueue.put(pcmData)
                     } catch (e: Exception) {
                         Log.e("AudioBridge", "[kokoro-synth] Error: ${e.message}")
                     }
                 }
                 // Signal playback thread that we're done
-                pcmQueue.put(null)
+                myPcmQueue.put(null)
             } catch (e: Exception) {
                 Log.e("AudioBridge", "[kokoro-synth] Thread error: ${e.message}")
-                pcmQueue.put(null)
+                myPcmQueue.put(null)
             }
         }.apply { name = "kokoro-synth"; start() }
     }
@@ -507,6 +544,9 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
     private fun startQueuePlayback() {
         if (isStreamingPlayback) return
         isStreamingPlayback = true
+
+        // Capture local references to the queues
+        val myPcmQueue = pcmQueue
 
         Thread {
             try {
@@ -542,7 +582,7 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
 
                 // Buffer-ahead: wait for first chunk before starting playback
                 // This prevents AudioTrack underruns on the first chunk
-                val firstPcm = pcmQueue.take() // blocks until first chunk is synthesized
+                val firstPcm = myPcmQueue.take() // blocks until first chunk is synthesized
                 if (firstPcm == null) {
                     // Done signal before any audio — nothing to play
                     track.release()
@@ -556,7 +596,7 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
 
                 // Pre-buffer: try to grab one more chunk if available (non-blocking)
                 val bufferedChunks = mutableListOf(firstPcm)
-                val extraChunk = pcmQueue.poll() // non-blocking
+                val extraChunk = myPcmQueue.poll() // non-blocking
                 if (extraChunk != null) bufferedChunks.add(extraChunk)
 
                 // Start playback
@@ -569,8 +609,8 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
 
                 // Continue consuming from queue
                 while (true) {
-                    val pcm = pcmQueue.take() // blocks until available
-                    if (pcm == null) break    // null = done signal
+                    val pcm = myPcmQueue.take() // blocks until available
+                    if (pcm == null) break      // null = done signal
                     track.write(pcm, 0, pcm.size)
                 }
 
