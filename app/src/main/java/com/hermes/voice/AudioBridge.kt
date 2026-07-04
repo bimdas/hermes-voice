@@ -224,16 +224,126 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
             }
 
             if (fileData != null && mime != null) {
-                // Use SSE streaming for Kokoro (3-thread pipeline), legacy for others
+                // Route to correct TTS engine
                 val ttsMode = getTtsMode()
-                if (ttsMode == "kokoro") {
-                    sendAudioToBridgeStreaming(fileData, mime)
-                } else {
-                    sendAudioToBridge(fileData, mime)
+                when (ttsMode) {
+                    "kokoro" -> sendAudioToBridgeStreaming(fileData, mime)
+                    "deepgram" -> sendAudioToBridgeForText(fileData, mime)
+                    else -> sendAudioToBridge(fileData, mime)
                 }
             } else {
                 activity.runOnUiThread {
                     webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('No audio recorded file found');", null)
+                }
+            }
+        }.start()
+    }
+
+    // Deepgram TTS: get text from bridge, synthesize with Deepgram, play audio
+    private fun sendAudioToBridgeForText(audioData: ByteArray, mimeType: String) {
+        Thread {
+            try {
+                val bridgeUrl = getBridgeUrl()
+                val url = java.net.URL("$bridgeUrl/voice/stream?tts=false")
+                val conn = url.openConnection() as java.net.HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.connectTimeout = 10000
+                conn.readTimeout = 120000
+                conn.doOutput = true
+                conn.doInput = true
+                conn.setRequestProperty("Content-Type", mimeType)
+
+                conn.outputStream.use { os ->
+                    os.write(audioData)
+                    os.flush()
+                }
+
+                val responseCode = conn.responseCode
+                if (responseCode != 200) {
+                    val errorMsg = "Stream returned code $responseCode"
+                    activity.runOnUiThread {
+                        webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('$errorMsg');", null)
+                    }
+                    return@Thread
+                }
+
+                val apiKey = getDeepgramApiKey()
+                if (apiKey.isEmpty()) {
+                    val errorMsg = "Deepgram API key not set"
+                    activity.runOnUiThread {
+                        webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('$errorMsg');", null)
+                    }
+                    return@Thread
+                }
+
+                val voice = getDeepgramVoice()
+                activity.runOnUiThread {
+                    webView.evaluateJavascript("if (window.onAudioPlayStarted) window.onAudioPlayStarted();", null)
+                }
+
+                var userTranscript = ""
+                val fullResponse = StringBuilder()
+
+                // Read SSE stream — get text chunks from bridge
+                conn.inputStream.bufferedReader().use { reader ->
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) {
+                        val l = line ?: continue
+                        if (!l.startsWith("data: ")) continue
+
+                        val jsonStr = l.removePrefix("data: ").trim()
+                        if (jsonStr.isEmpty()) continue
+
+                        try {
+                            val event = org.json.JSONObject(jsonStr)
+                            when (event.optString("event")) {
+                                "transcript" -> {
+                                    userTranscript = event.optString("text", "")
+                                    activity.runOnUiThread {
+                                        val esc = org.json.JSONObject.quote(userTranscript)
+                                        webView.evaluateJavascript("if (window.onBridgeSuccess) window.onBridgeSuccess($esc, '');", null)
+                                    }
+                                }
+                                "sentence" -> {
+                                    val sentence = event.optString("text", "").trim()
+                                    if (sentence.isNotEmpty()) {
+                                        fullResponse.append(sentence).append(" ")
+                                        activity.runOnUiThread {
+                                            val esc = org.json.JSONObject.quote(fullResponse.toString().trim())
+                                            webView.evaluateJavascript("if (window.onBridgeSuccess) window.onBridgeSuccess(${org.json.JSONObject.quote(userTranscript)}, $esc);", null)
+                                        }
+                                        // Synthesize with Deepgram and play immediately
+                                        val audioBytes = ttsDeepgram(sentence, voice, apiKey)
+                                        if (audioBytes != null) {
+                                            playAudioBytesStreaming(audioBytes)
+                                        }
+                                    }
+                                }
+                                "done" -> {
+                                    Log.i("AudioBridge", "[deepgram-stream] Done: ${fullResponse.toString().trim().take(80)}")
+                                }
+                                "error" -> {
+                                    val errText = event.optString("text", "Unknown error")
+                                    activity.runOnUiThread {
+                                        webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('$errText');", null)
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.w("AudioBridge", "[deepgram-stream] Parse error: $e")
+                        }
+                    }
+                }
+
+                activity.runOnUiThread {
+                    webView.evaluateJavascript("if (window.onAudioPlayCompleted) window.onAudioPlayCompleted();", null)
+                }
+
+            } catch (e: Exception) {
+                val errorMsg = (e.message ?: "Unknown error").replace("'", "\\'").take(200)
+                Log.e("AudioBridge", "sendAudioToBridgeForText error: $errorMsg")
+                activity.runOnUiThread {
+                    webView.evaluateJavascript("if (window.onBridgeError) window.onBridgeError('$errorMsg');", null)
                 }
             }
         }.start()
@@ -989,6 +1099,106 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
     fun isLocalTtsEnabled(): Boolean {
         val mode = getTtsMode()
         return mode == "system" || mode == "kokoro"
+    }
+
+    // ---- Deepgram TTS ----
+    @JavascriptInterface
+    fun getDeepgramApiKey(): String {
+        val prefs = activity.getSharedPreferences("hermes_voice", android.content.Context.MODE_PRIVATE)
+        return prefs.getString("deepgram_api_key", "") ?: ""
+    }
+
+    @JavascriptInterface
+    fun setDeepgramApiKey(key: String) {
+        val prefs = activity.getSharedPreferences("hermes_voice", android.content.Context.MODE_PRIVATE)
+        prefs.edit().putString("deepgram_api_key", key).apply()
+    }
+
+    @JavascriptInterface
+    fun getDeepgramVoice(): String {
+        val prefs = activity.getSharedPreferences("hermes_voice", android.content.Context.MODE_PRIVATE)
+        return prefs.getString("deepgram_voice", "aura-2-thalia-en") ?: "aura-2-thalia-en"
+    }
+
+    @JavascriptInterface
+    fun setDeepgramVoice(voice: String) {
+        val prefs = activity.getSharedPreferences("hermes_voice", android.content.Context.MODE_PRIVATE)
+        prefs.edit().putString("deepgram_voice", voice).apply()
+    }
+
+    private fun ttsDeepgram(text: String, voice: String, apiKey: String): ByteArray? {
+        try {
+            val url = java.net.URL("https://api.deepgram.com/v1/speak?model=$voice&encoding=linear16&sample_rate=24000")
+            val conn = url.openConnection() as java.net.HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 10000
+            conn.readTimeout = 30000
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("Authorization", "Token $apiKey")
+
+            val body = org.json.JSONObject()
+            body.put("text", text)
+            conn.outputStream.use { it.write(body.toString().toByteArray()) }
+
+            if (conn.responseCode != 200) {
+                Log.e("AudioBridge", "[deepgram-tts] HTTP \${conn.responseCode}")
+                return null
+            }
+            val audio = conn.inputStream.use { it.readBytes() }
+            Log.d("AudioBridge", "[deepgram-tts] \${text.take(40)}... -> \${audio.size} bytes")
+            return audio
+        } catch (e: Exception) {
+            Log.e("AudioBridge", "[deepgram-tts] Error: \${e.message}")
+            return null
+        }
+    }
+
+    private fun playAudioBytesStreaming(audioBytes: ByteArray) {
+        // Plays raw PCM16 audio via AudioTrack (for Deepgram linear16 output)
+        try {
+            val sampleRate = 24000
+            val channels = 1
+            val bitsPerSample = 16
+            val byteRate = sampleRate * channels * bitsPerSample / 8
+
+            val bufSize = android.media.AudioTrack.getMinBufferSize(
+                sampleRate,
+                android.media.AudioFormat.CHANNEL_OUT_MONO,
+                android.media.AudioFormat.ENCODING_PCM_16BIT
+            )
+
+            val track = android.media.AudioTrack.Builder()
+                .setAudioAttributes(
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(
+                            if (speakerEnabled) android.media.AudioAttributes.USAGE_MEDIA
+                            else android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION
+                        )
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAudioFormat(
+                    android.media.AudioFormat.Builder()
+                        .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(sampleRate)
+                        .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_MONO)
+                        .build()
+                )
+                .setBufferSizeInBytes(maxOf(bufSize, 4096))
+                .setTransferMode(android.media.AudioTrack.MODE_STREAM)
+                .build()
+
+            audioTrack = track
+            track.play()
+            track.write(audioBytes, 0, audioBytes.size)
+            Thread.sleep(100)
+            track.stop()
+            track.release()
+            audioTrack = null
+        } catch (e: Exception) {
+            Log.e("AudioBridge", "[deepgram-play] Error: \${e.message}")
+        }
     }
 
     @JavascriptInterface

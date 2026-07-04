@@ -597,6 +597,7 @@ input:checked + .slider:before {
         <option value="system">System TTS (On-Device)</option>
         <option value="edge">Edge TTS (Voice Bridge Server)</option>
         <option value="kokoro">Kokoro TTS (Local 82M)</option>
+        <option value="deepgram">Deepgram Aura-2 (Cloud)</option>
       </select>
     </div>
 
@@ -636,6 +637,37 @@ input:checked + .slider:before {
         <label>Stream Chunk Size (40 - 300 chars)</label>
         <input type="number" id="chunkSizeInput" placeholder="120" min="40" max="300" step="10">
         <div style="font-size:11px;color:#64748b;margin-top:4px;">Smaller = faster response, larger = smoother speech. Default: 120</div>
+      </div>
+    </div>
+    <div id="deepgramTtsSettings" style="display: none;">
+      <div class="settings-field">
+        <label>Deepgram API Key</label>
+        <input type="password" id="deepgramApiKeyInput" placeholder="Your Deepgram API key">
+      </div>
+      <div class="settings-field">
+        <label>Deepgram Voice</label>
+        <select id="deepgramVoiceSelect">
+          <option value="aura-2-thalia-en">thalia - Clear, Confident, Energetic (US Female)</option>
+          <option value="aura-2-andromeda-en">andromeda - Casual, Expressive (US Female)</option>
+          <option value="aura-2-helena-en">helena - Caring, Natural, Friendly (US Female)</option>
+          <option value="aura-2-apollo-en">apollo - Confident, Casual (US Male)</option>
+          <option value="aura-2-arcas-en">arcas - Natural, Smooth, Clear (US Male)</option>
+          <option value="aura-2-aries-en">aries - Warm, Energetic (US Male)</option>
+          <option value="aura-2-asteria-en">asteria - Clear, Confident, Energetic (US Female)</option>
+          <option value="aura-2-athena-en">athena - Calm, Smooth, Professional (US Female)</option>
+          <option value="aura-2-atlas-en">atlas - Enthusiastic, Friendly (US Male)</option>
+          <option value="aura-2-hyperion-en">hyperion - Caring, Warm (AU Male)</option>
+          <option value="aura-2-theia-en">theia - Expressive, Polite (AU Female)</option>
+          <option value="aura-2-draco-en">draco - Warm, Trustworthy (UK Male)</option>
+          <option value="aura-2-pandora-en">pandora - Smooth, Calm (UK Female)</option>
+          <option value="aura-2-angus-en">angus - Warm, Friendly (IE Male)</option>
+          <option value="aura-2-hermes-en">hermes - Expressive, Professional (US Male)</option>
+          <option value="aura-2-zeus-en">zeus - Deep, Trustworthy (US Male)</option>
+          <option value="aura-2-vesta-en">vesta - Natural, Patient, Empathetic (US Female)</option>
+          <option value="aura-2-ophelia-en">ophelia - Expressive, Cheerful (US Female)</option>
+          <option value="aura-2-orion-en">orion - Approachable, Calm (US Male)</option>
+          <option value="aura-2-luna-en">luna - Friendly, Natural (US Female)</option>
+        </select>
       </div>
     </div>
     
@@ -1086,6 +1118,7 @@ function toggleTtsFields() {
   const mode = document.getElementById('ttsModeSelect').value;
   document.getElementById('systemTtsSettings').style.display = (mode === 'system') ? 'block' : 'none';
   document.getElementById('kokoroTtsSettings').style.display = (mode === 'kokoro') ? 'block' : 'none';
+  document.getElementById('deepgramTtsSettings').style.display = (mode === 'deepgram') ? 'block' : 'none';
   
   if (mode === 'kokoro') {
     checkKokoroModelStatus();
@@ -1155,6 +1188,8 @@ function openSettings() {
     document.getElementById('kokoroVoiceSelect').value = AudioBridge.getKokoroVoice();
     document.getElementById('kokoroSpeedInput').value = AudioBridge.getKokoroSpeed();
     document.getElementById('chunkSizeInput').value = AudioBridge.getChunkSize();
+    document.getElementById('deepgramApiKeyInput').value = AudioBridge.getDeepgramApiKey();
+    document.getElementById('deepgramVoiceSelect').value = AudioBridge.getDeepgramVoice();
     
     toggleTtsFields();
   } catch(e) {
@@ -1179,6 +1214,8 @@ function saveSettings() {
   const kokoroVoice = document.getElementById('kokoroVoiceSelect').value;
   const kokoroSpeed = parseFloat(document.getElementById('kokoroSpeedInput').value) || 1.0;
   const chunkSize = parseInt(document.getElementById('chunkSizeInput').value) || 120;
+  const deepgramApiKey = document.getElementById('deepgramApiKeyInput').value.trim();
+  const deepgramVoice = document.getElementById('deepgramVoiceSelect').value;
   
   try {
     if (url) {
@@ -1203,6 +1240,8 @@ function saveSettings() {
     AudioBridge.setKokoroVoice(kokoroVoice);
     AudioBridge.setKokoroSpeed(kokoroSpeed);
     AudioBridge.setChunkSize(chunkSize);
+    if (deepgramApiKey) AudioBridge.setDeepgramApiKey(deepgramApiKey);
+    AudioBridge.setDeepgramVoice(deepgramVoice);
     
     log('Settings updated successfully');
   } catch(e) {
