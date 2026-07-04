@@ -1171,7 +1171,7 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
         prefs.edit().putString("deepgram_voice", voice).apply()
     }
 
-    private fun ttsDeepgram(text: String, voice: String, apiKey: *** ByteArray? {
+    private fun ttsDeepgram(text: String, voice: String, apiKey: String): ByteArray? {
         try {
             Log.i("AudioBridge", "[deepgram-tts] Sending ${text.length} chars, voice=$voice")
             val url = java.net.URL("https://api.deepgram.com/v1/speak?model=$voice&encoding=linear16&sample_rate=24000")
