@@ -239,7 +239,7 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
         }.start()
     }
 
-    // Deepgram TTS: get text from bridge, synthesize with Deepgram, play audio
+    // Deepgram TTS: buffer full response, synthesize as one request, stream audio
     private fun sendAudioToBridgeForText(audioData: ByteArray, mimeType: String) {
         Thread {
             try {
@@ -277,14 +277,10 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
                 }
 
                 val voice = getDeepgramVoice()
-                activity.runOnUiThread {
-                    webView.evaluateJavascript("if (window.onAudioPlayStarted) window.onAudioPlayStarted();", null)
-                }
-
                 var userTranscript = ""
                 val fullResponse = StringBuilder()
 
-                // Read SSE stream — get text chunks from bridge
+                // Phase 1: Buffer the full response from SSE stream
                 conn.inputStream.bufferedReader().use { reader ->
                     var line: String?
                     while (reader.readLine().also { line = it } != null) {
@@ -308,19 +304,15 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
                                     val sentence = event.optString("text", "").trim()
                                     if (sentence.isNotEmpty()) {
                                         fullResponse.append(sentence).append(" ")
+                                        // Update UI with growing response text
                                         activity.runOnUiThread {
                                             val esc = org.json.JSONObject.quote(fullResponse.toString().trim())
                                             webView.evaluateJavascript("if (window.onBridgeSuccess) window.onBridgeSuccess(${org.json.JSONObject.quote(userTranscript)}, $esc);", null)
                                         }
-                                        // Synthesize with Deepgram and play immediately
-                                        val audioBytes = ttsDeepgram(sentence, voice, apiKey)
-                                        if (audioBytes != null) {
-                                            playAudioBytesStreaming(audioBytes)
-                                        }
                                     }
                                 }
                                 "done" -> {
-                                    Log.i("AudioBridge", "[deepgram-stream] Done: ${fullResponse.toString().trim().take(80)}")
+                                    Log.i("AudioBridge", "[deepgram-buffer] Done buffering: ${fullResponse.toString().trim().take(80)}")
                                 }
                                 "error" -> {
                                     val errText = event.optString("text", "Unknown error")
@@ -330,7 +322,35 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
                                 }
                             }
                         } catch (e: Exception) {
-                            Log.w("AudioBridge", "[deepgram-stream] Parse error: $e")
+                            Log.w("AudioBridge", "[deepgram-buffer] Parse error: $e")
+                        }
+                    }
+                }
+
+                // Phase 2: Synthesize full response with Deepgram and play
+                val text = fullResponse.toString().trim()
+                if (text.isNotEmpty()) {
+                    activity.runOnUiThread {
+                        webView.evaluateJavascript("if (window.onAudioPlayStarted) window.onAudioPlayStarted();", null)
+                    }
+
+                    if (text.length <= 2000) {
+                        // Short response: single Deepgram request, gapless audio
+                        Log.i("AudioBridge", "[deepgram] Single request: ${text.length} chars")
+                        val audioBytes = ttsDeepgram(text, voice, apiKey)
+                        if (audioBytes != null) {
+                            playAudioBytesStreaming(audioBytes)
+                        }
+                    } else {
+                        // Long response: split into ~1800-char chunks at sentence boundaries
+                        val chunks = splitForDeepgram(text, 1800)
+                        Log.i("AudioBridge", "[deepgram] ${chunks.size} chunks for ${text.length} chars")
+                        for ((i, chunk) in chunks.withIndex()) {
+                            Log.d("AudioBridge", "[deepgram] Chunk ${i+1}/${chunks.size}: ${chunk.length} chars")
+                            val audioBytes = ttsDeepgram(chunk, voice, apiKey)
+                            if (audioBytes != null) {
+                                playAudioBytesStreaming(audioBytes)
+                            }
                         }
                     }
                 }
@@ -1102,6 +1122,31 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
     }
 
     // ---- Deepgram TTS ----
+    private fun splitForDeepgram(text: String, maxChars: Int): List<String> {
+        if (text.length <= maxChars) return listOf(text)
+        val chunks = mutableListOf<String>()
+        var remaining = text
+        while (remaining.length > maxChars) {
+            // Find the last sentence boundary within maxChars
+            var splitAt = -1
+            for (i in maxChars - 1 downTo maxChars / 2) {
+                if (remaining[i] == '.' || remaining[i] == '!' || remaining[i] == '?') {
+                    splitAt = i + 1
+                    break
+                }
+            }
+            if (splitAt <= 0) {
+                // No sentence boundary found, split at last space
+                splitAt = remaining.lastIndexOf(' ', maxChars - 1)
+                if (splitAt <= 0) splitAt = maxChars
+            }
+            chunks.add(remaining.substring(0, splitAt).trim())
+            remaining = remaining.substring(splitAt).trim()
+        }
+        if (remaining.isNotEmpty()) chunks.add(remaining)
+        return chunks
+    }
+
     @JavascriptInterface
     fun getDeepgramApiKey(): String {
         val prefs = activity.getSharedPreferences("hermes_voice", android.content.Context.MODE_PRIVATE)
