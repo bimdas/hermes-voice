@@ -338,8 +338,13 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
                         // Short response: single Deepgram request, gapless audio
                         Log.i("AudioBridge", "[deepgram] Single request: ${text.length} chars")
                         val audioBytes = ttsDeepgram(text, voice, apiKey)
-                        if (audioBytes != null) {
+                        if (audioBytes != null && audioBytes.isNotEmpty()) {
                             playAudioBytesStreaming(audioBytes)
+                        } else {
+                            Log.e("AudioBridge", "[deepgram] TTS returned null/empty for ${text.length} chars")
+                            activity.runOnUiThread {
+                                webView.evaluateJavascript("if (window.onAudioError) window.onAudioError('Deepgram TTS failed - no audio returned');", null)
+                            }
                         }
                     } else {
                         // Long response: split into ~1800-char chunks at sentence boundaries
@@ -348,8 +353,13 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
                         for ((i, chunk) in chunks.withIndex()) {
                             Log.d("AudioBridge", "[deepgram] Chunk ${i+1}/${chunks.size}: ${chunk.length} chars")
                             val audioBytes = ttsDeepgram(chunk, voice, apiKey)
-                            if (audioBytes != null) {
+                            if (audioBytes != null && audioBytes.isNotEmpty()) {
                                 playAudioBytesStreaming(audioBytes)
+                            } else {
+                                Log.e("AudioBridge", "[deepgram] TTS failed for chunk ${i+1}")
+                                activity.runOnUiThread {
+                                    webView.evaluateJavascript("if (window.onAudioError) window.onAudioError('Deepgram TTS failed on chunk ${i+1}');", null)
+                                }
                             }
                         }
                     }
@@ -1205,49 +1215,42 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
 
     private fun playAudioBytesStreaming(audioBytes: ByteArray) {
         // Plays raw PCM16 audio via AudioTrack (for Deepgram linear16 output)
-        try {
-            val sampleRate = 24000
-            val channels = 1
-            val bitsPerSample = 16
-            val byteRate = sampleRate * channels * bitsPerSample / 8
+        // Throws on error so caller can report to user
+        val sampleRate = 24000
+        val bufSize = android.media.AudioTrack.getMinBufferSize(
+            sampleRate,
+            android.media.AudioFormat.CHANNEL_OUT_MONO,
+            android.media.AudioFormat.ENCODING_PCM_16BIT
+        )
 
-            val bufSize = android.media.AudioTrack.getMinBufferSize(
-                sampleRate,
-                android.media.AudioFormat.CHANNEL_OUT_MONO,
-                android.media.AudioFormat.ENCODING_PCM_16BIT
+        val track = android.media.AudioTrack.Builder()
+            .setAudioAttributes(
+                android.media.AudioAttributes.Builder()
+                    .setUsage(
+                        if (speakerEnabled) android.media.AudioAttributes.USAGE_MEDIA
+                        else android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION
+                    )
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
             )
+            .setAudioFormat(
+                android.media.AudioFormat.Builder()
+                    .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_MONO)
+                    .build()
+            )
+            .setBufferSizeInBytes(maxOf(bufSize, 4096))
+            .setTransferMode(android.media.AudioTrack.MODE_STREAM)
+            .build()
 
-            val track = android.media.AudioTrack.Builder()
-                .setAudioAttributes(
-                    android.media.AudioAttributes.Builder()
-                        .setUsage(
-                            if (speakerEnabled) android.media.AudioAttributes.USAGE_MEDIA
-                            else android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION
-                        )
-                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                .setAudioFormat(
-                    android.media.AudioFormat.Builder()
-                        .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(sampleRate)
-                        .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_MONO)
-                        .build()
-                )
-                .setBufferSizeInBytes(maxOf(bufSize, 4096))
-                .setTransferMode(android.media.AudioTrack.MODE_STREAM)
-                .build()
-
-            audioTrack = track
-            track.play()
-            track.write(audioBytes, 0, audioBytes.size)
-            Thread.sleep(100)
-            track.stop()
-            track.release()
-            audioTrack = null
-        } catch (e: Exception) {
-            Log.e("AudioBridge", "[deepgram-play] Error: \${e.message}")
-        }
+        audioTrack = track
+        track.play()
+        track.write(audioBytes, 0, audioBytes.size)
+        Thread.sleep(100)
+        track.stop()
+        track.release()
+        audioTrack = null
     }
 
     @JavascriptInterface
