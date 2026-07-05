@@ -333,12 +333,19 @@ class AudioBridge(private val activity: MainActivity, private val webView: WebVi
                     }
                 }
 
+                // Debug: confirm we exited the SSE stream
+                activity.runOnUiThread {
+                    webView.evaluateJavascript("if (window.log) window.log('[Deepgram] SSE ended. Response length: ${fullResponse.length}');", null)
+                }
+
                 // Phase 2: Synthesize with Deepgram, split by chunk size
-                if (fullResponse.isNotEmpty()) {
-                    val text = fullResponse.toString().trim()
-                    val chunkSize = getDeepgramChunkSize()
+                val text = fullResponse.toString().trim()
+                val chunkSize = getDeepgramChunkSize()
+                activity.runOnUiThread {
+                    webView.evaluateJavascript("if (window.log) window.log('[Deepgram] Phase 2: ${text.length} chars, chunk=$chunkSize, key=${apiKey.take(4)}...');", null)
+                }
+                if (text.isNotEmpty()) {
                     activity.runOnUiThread {
-                        webView.evaluateJavascript("if (window.log) window.log('[Deepgram] Phase 2: ${text.length} chars, chunk=$chunkSize');", null)
                         webView.evaluateJavascript("if (window.onAudioPlayStarted) window.onAudioPlayStarted();", null)
                     }
 
